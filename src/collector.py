@@ -67,7 +67,12 @@ def _request_with_retry(method: str, url: str, **kwargs) -> requests.Response:
 
 
 def fetch_hyperliquid_volume() -> Optional[float]:
-    """Fetch total 24h notional volume from Hyperliquid."""
+    """Fetch total 24h notional volume from Hyperliquid.
+
+    Note: This covers the 230 native assets returned by metaAndAssetCtxs.
+    HIP-3 markets (oil, gold, silver, equities, etc.) are not included
+    because they are not exposed via the public API.
+    """
     try:
         resp = _request_with_retry(
             "POST", HYPERLIQUID_URL, json={"type": "metaAndAssetCtxs"}

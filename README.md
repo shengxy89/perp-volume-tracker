@@ -98,6 +98,10 @@ The daily email contains:
 | `bn_volume` | float  | Binance 24h volume (USD)             |
 | `ratio`     | float  | HL / BN ratio (6 decimal places)     |
 
+### Data Scope Note
+
+The Hyperliquid volume is sourced from the public `metaAndAssetCtxs` API endpoint, which covers **230 native perpetual assets** (BTC, ETH, SOL, altcoins, etc.). It **does not include** HIP-3 markets such as oil, gold, silver, equities, or other real-world asset (RWA) perpetuals, because these are not exposed via the public API. As a result, the HL/BN ratio reflects native-crypto perpetual volume only and may understate Hyperliquid's true platform volume by approximately 25-35%.
+
 ---
 
 ## License
