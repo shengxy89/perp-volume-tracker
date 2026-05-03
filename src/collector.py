@@ -1,9 +1,15 @@
 """API collectors for Hyperliquid and Binance perpetual volume data."""
 
+import csv
+import io
 import logging
 import os
 import time
+import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta, timezone
 from typing import Optional
+from xml.etree import ElementTree as ET
 
 import requests
 
@@ -16,9 +22,12 @@ BINANCE_URLS = [
     "https://fapi2.binance.com/fapi/v1/ticker/24hr",
     "https://fapi3.binance.com/fapi/v1/ticker/24hr",
 ]
+BINANCE_PUBLIC_DATA_S3_URL = "https://s3-ap-northeast-1.amazonaws.com/data.binance.vision"
+BINANCE_PUBLIC_DATA_BASE_URL = "https://data.binance.vision/data/futures/um/daily/klines"
 TIMEOUT = 30
 MAX_RETRIES = 3
 BACKOFF_DELAYS = [1, 2, 4]
+PUBLIC_DATA_WORKERS = int(os.environ.get("BINANCE_PUBLIC_DATA_WORKERS", "16"))
 
 DEFAULT_HEADERS = {
     "User-Agent": (
@@ -106,8 +115,117 @@ def _fetch_binance_from_url(url: str) -> Optional[float]:
             if isinstance(ticker, dict):
                 total += float(ticker.get("quoteVolume", 0) or 0)
         return round(total, 2)
-    except Exception:
+    except Exception as exc:
+        logger.warning("Binance URL %s failed: %s", url, exc)
         return None
+
+
+def _get_binance_archive_date() -> str:
+    """Return the UTC date used by Binance public daily archives."""
+    override = os.environ.get("BINANCE_ARCHIVE_DATE")
+    if override:
+        return override
+    return (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+
+
+def _fetch_binance_public_symbols() -> list[str]:
+    """List USD stable-quoted symbols available in Binance USD-M futures archive."""
+    resp = _request_with_retry(
+        "GET",
+        BINANCE_PUBLIC_DATA_S3_URL,
+        params={
+            "list-type": "2",
+            "prefix": "data/futures/um/daily/klines/",
+            "delimiter": "/",
+        },
+    )
+    root = ET.fromstring(resp.content)
+    namespace = {"s3": "http://s3.amazonaws.com/doc/2006-03-01/"}
+    symbols: list[str] = []
+
+    for elem in root.findall("s3:CommonPrefixes/s3:Prefix", namespace):
+        if not elem.text:
+            continue
+        parts = elem.text.rstrip("/").split("/")
+        symbol = parts[-1]
+        if symbol.endswith(("USDT", "USDC", "BUSD")):
+            symbols.append(symbol)
+
+    return symbols
+
+
+def _fetch_binance_public_symbol_volume(symbol: str, archive_date: str) -> Optional[float]:
+    """Fetch one symbol's 1d quote volume from Binance public data archive."""
+    url = (
+        f"{BINANCE_PUBLIC_DATA_BASE_URL}/{symbol}/1d/"
+        f"{symbol}-1d-{archive_date}.zip"
+    )
+
+    try:
+        resp = requests.get(url, headers=DEFAULT_HEADERS, timeout=TIMEOUT)
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+
+        with zipfile.ZipFile(io.BytesIO(resp.content)) as archive:
+            names = archive.namelist()
+            if not names:
+                return None
+            csv_text = archive.read(names[0]).decode("utf-8")
+            rows = list(csv.DictReader(io.StringIO(csv_text)))
+            if not rows:
+                return None
+            return float(rows[0]["quote_volume"])
+    except Exception as exc:
+        logger.debug("Failed to fetch Binance public archive for %s: %s", symbol, exc)
+        return None
+
+
+def fetch_binance_public_data_volume() -> Optional[float]:
+    """Fetch Binance USD-M futures daily quote volume from public data archive.
+
+    This is a fallback for environments where Binance Futures REST APIs return
+    HTTP 451. The archive publishes completed UTC daily klines, so the fallback
+    uses yesterday's UTC data by default.
+    """
+    archive_date = _get_binance_archive_date()
+    logger.info("Fetching Binance public data archive for %s", archive_date)
+
+    try:
+        symbols = _fetch_binance_public_symbols()
+    except Exception as exc:
+        logger.error("Failed to list Binance public data symbols: %s", exc)
+        return None
+
+    if not symbols:
+        logger.error("No Binance public data symbols found")
+        return None
+
+    total = 0.0
+    found = 0
+    max_workers = max(1, PUBLIC_DATA_WORKERS)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(_fetch_binance_public_symbol_volume, symbol, archive_date): symbol
+            for symbol in symbols
+        }
+        for future in as_completed(futures):
+            volume = future.result()
+            if volume is None:
+                continue
+            total += volume
+            found += 1
+
+    if found == 0:
+        logger.error("No Binance public archive files found for %s", archive_date)
+        return None
+
+    logger.info(
+        "Binance public data archive fetched for %s symbols on %s",
+        found,
+        archive_date,
+    )
+    return round(total, 2)
 
 
 def fetch_binance_volume() -> Optional[float]:
@@ -118,5 +236,11 @@ def fetch_binance_volume() -> Optional[float]:
             logger.info("Binance data fetched successfully from %s", url)
             return result
         logger.warning("Binance URL %s failed, trying next fallback...", url)
-    logger.error("All Binance URLs failed")
+
+    logger.warning("Binance Futures API failed; trying public data archive fallback")
+    result = fetch_binance_public_data_volume()
+    if result is not None:
+        return result
+
+    logger.error("All Binance data sources failed")
     return None

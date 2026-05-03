@@ -60,6 +60,7 @@ Cron Trigger (GitHub Actions)
 | `SMTP_PASSWORD`| SMTP app password                 | *(required)*          |
 | `NOTIFY_EMAIL`| Recipient email(s), comma-separated| *(required)*          |
 | `TZ`          | Timezone for date recording        | `Asia/Hong_Kong`      |
+| `BINANCE_PUBLIC_DATA_WORKERS` | Parallel downloads for Binance public-data fallback | `16` |
 
 ---
 
@@ -101,6 +102,8 @@ The daily email contains:
 ### Data Scope Note
 
 The Hyperliquid volume is sourced from the public `metaAndAssetCtxs` API endpoint, which covers **230 native perpetual assets** (BTC, ETH, SOL, altcoins, etc.). It **does not include** HIP-3 markets such as oil, gold, silver, equities, or other real-world asset (RWA) perpetuals, because these are not exposed via the public API. As a result, the HL/BN ratio reflects native-crypto perpetual volume only and may understate Hyperliquid's true platform volume by approximately 25-35%.
+
+Binance Futures REST endpoints may return HTTP 451 from some hosted runner regions. When that happens, the tracker falls back to Binance's official public data archive (`data.binance.vision`) and sums completed UTC daily USD-M futures kline `quote_volume` files for the previous UTC day.
 
 ---
 
